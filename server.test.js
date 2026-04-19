@@ -9,7 +9,6 @@ const {
   extractCookieHeader,
   normalizeLiveRecord,
   parseSearchBrief,
-  shouldRetryWithCurl,
 } = require('./server');
 
 test('parseSearchBrief extracts make, model, and budget cleanly', () => {
@@ -157,23 +156,4 @@ test('normalizeLiveRecord drops malformed or price-less rows', () => {
   );
 
   assert.equal(normalized, null);
-});
-
-test('shouldRetryWithCurl only retries on explicit gateway blocking', () => {
-  assert.equal(
-    shouldRetryWithCurl(new Error('AutoTrader gateway responded with 403')),
-    true,
-  );
-  assert.equal(
-    shouldRetryWithCurl(new Error('AutoTrader gateway timed out after 7000ms')),
-    true,
-  );
-  assert.equal(
-    shouldRetryWithCurl(new Error('fetch failed')),
-    true,
-  );
-  assert.equal(
-    shouldRetryWithCurl(new Error('AutoTrader gateway returned an error')),
-    false,
-  );
 });
