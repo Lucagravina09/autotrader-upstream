@@ -4,6 +4,7 @@ const cors = require('cors');
 const AUTOTRADER_GRAPHQL_URL =
   process.env.AUTOTRADER_GRAPHQL_URL ||
   'https://www.autotrader.co.uk/at-gateway?opname=SearchResultsListingsGridQuery';
+const AUTOTRADER_WEB_ORIGIN = 'https://www.autotrader.co.uk';
 const AUTOTRADER_DEFAULT_POSTCODE =
   process.env.AUTOTRADER_DEFAULT_POSTCODE || 'M1 7BL';
 const AUTOTRADER_TIMEOUT_MS = normalizePositiveInt(
@@ -298,11 +299,18 @@ async function fetchAutotraderSearch({ filters, page, searchId }) {
   const timeoutId = setTimeout(() => controller.abort(), AUTOTRADER_TIMEOUT_MS);
 
   try {
+    const browserSession = await primeAutotraderSession({
+      filters,
+      signal: controller.signal,
+    });
     const response = await fetch(AUTOTRADER_GRAPHQL_URL, {
       method: 'POST',
-      headers: {
-        'content-type': 'application/json',
-      },
+      headers: buildBrowserHeaders({
+        accept: '*/*',
+        contentType: 'application/json',
+        referer: browserSession.referer,
+        cookieHeader: browserSession.cookieHeader,
+      }),
       body: JSON.stringify({
         operationName: 'SearchResultsListingsGridQuery',
         query: SEARCH_RESULTS_QUERY,
@@ -343,6 +351,32 @@ async function fetchAutotraderSearch({ filters, page, searchId }) {
     throw error;
   } finally {
     clearTimeout(timeoutId);
+  }
+}
+
+async function primeAutotraderSession({ filters, signal }) {
+  const referer = buildAutotraderSearchPageUrl(filters);
+
+  try {
+    const response = await fetch(referer, {
+      method: 'GET',
+      headers: buildBrowserHeaders({
+        accept:
+          'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        referer: `${AUTOTRADER_WEB_ORIGIN}/`,
+      }),
+      signal,
+    });
+
+    return {
+      referer,
+      cookieHeader: extractCookieHeader(response.headers),
+    };
+  } catch (_error) {
+    return {
+      referer,
+      cookieHeader: '',
+    };
   }
 }
 
@@ -446,6 +480,40 @@ function buildAutotraderFilters({ parsed, postcode }) {
   }
 
   return filters;
+}
+
+function buildAutotraderSearchPageUrl(filters) {
+  const params = new URLSearchParams();
+
+  for (const filter of filters) {
+    if (!filter || !filter.filter || !Array.isArray(filter.selected)) continue;
+
+    const [firstValue] = filter.selected.filter(Boolean);
+    if (!firstValue) continue;
+
+    switch (filter.filter) {
+      case 'postcode':
+        params.set('postcode', firstValue);
+        break;
+      case 'make':
+        params.set('make', firstValue);
+        break;
+      case 'model':
+        params.set('model', firstValue);
+        break;
+      case 'keywords':
+        params.set('keywords', firstValue);
+        break;
+      default:
+        break;
+    }
+  }
+
+  if (!params.has('postcode')) {
+    params.set('postcode', AUTOTRADER_DEFAULT_POSTCODE);
+  }
+
+  return `${AUTOTRADER_WEB_ORIGIN}/car-search?${params.toString()}`;
 }
 
 function normalizeLiveRecords(rawListings, query) {
@@ -595,6 +663,40 @@ function buildListingUrl(advertId) {
   return `https://www.autotrader.co.uk/car-details/${encodeURIComponent(advertId)}`;
 }
 
+function buildBrowserHeaders({
+  accept,
+  contentType,
+  referer,
+  cookieHeader,
+}) {
+  const headers = {
+    accept: accept || '*/*',
+    'accept-language': 'en-GB,en;q=0.9',
+    origin: AUTOTRADER_WEB_ORIGIN,
+    priority: 'u=1, i',
+    referer: referer || `${AUTOTRADER_WEB_ORIGIN}/`,
+    'sec-ch-ua':
+      '"Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"',
+    'sec-ch-ua-mobile': '?0',
+    'sec-ch-ua-platform': '"macOS"',
+    'sec-fetch-dest': 'empty',
+    'sec-fetch-mode': 'cors',
+    'sec-fetch-site': 'same-origin',
+    'user-agent':
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
+  };
+
+  if (contentType) {
+    headers['content-type'] = contentType;
+  }
+
+  if (cookieHeader) {
+    headers.cookie = cookieHeader;
+  }
+
+  return headers;
+}
+
 function absolutizeAutoTraderPath(path) {
   if (!path) return null;
   if (path.startsWith('http://') || path.startsWith('https://')) {
@@ -607,6 +709,23 @@ function normalizeImageUrl(url) {
   const value = stringOrNull(url);
   if (!value) return '';
   return value.replace('{resize}', '800x600');
+}
+
+function extractCookieHeader(headers) {
+  if (!headers || typeof headers !== 'object') {
+    return '';
+  }
+
+  if (typeof headers.getSetCookie === 'function') {
+    return headers
+      .getSetCookie()
+      .map((cookie) => cookie.split(';')[0])
+      .filter(Boolean)
+      .join('; ');
+  }
+
+  const singleCookie = headers.get?.('set-cookie');
+  return singleCookie ? singleCookie.split(';')[0] : '';
 }
 
 function deriveSellerName({ dealerLink, sellerType, title }) {
@@ -820,9 +939,12 @@ if (require.main === module) {
 module.exports = {
   app,
   buildAutotraderFilters,
+  buildAutotraderSearchPageUrl,
+  buildBrowserHeaders,
   buildListingUrl,
   buildSearchId,
   deriveSellerName,
+  extractCookieHeader,
   extractBudgetAround,
   extractBudgetMax,
   normalizeImageUrl,

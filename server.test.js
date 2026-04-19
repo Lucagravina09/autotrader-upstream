@@ -3,6 +3,9 @@ const assert = require('node:assert/strict');
 
 const {
   buildAutotraderFilters,
+  buildAutotraderSearchPageUrl,
+  buildBrowserHeaders,
+  extractCookieHeader,
   normalizeLiveRecord,
   parseSearchBrief,
 } = require('./server');
@@ -39,6 +42,49 @@ test('buildAutotraderFilters includes postcode and shaped search constraints', (
     { filter: 'max_price', selected: ['6000'] },
     { filter: 'keywords', selected: ['sporty'] },
   ]);
+});
+
+test('buildAutotraderSearchPageUrl produces a safe browser priming URL', () => {
+  const parsed = parseSearchBrief('Ford Fiesta');
+  const filters = buildAutotraderFilters({
+    parsed,
+    postcode: 'M1 7BL',
+  });
+
+  assert.equal(
+    buildAutotraderSearchPageUrl(filters),
+    'https://www.autotrader.co.uk/car-search?postcode=M1+7BL&make=Ford&model=Fiesta',
+  );
+});
+
+test('buildBrowserHeaders keeps origin and cookie context for upstream fetches', () => {
+  const headers = buildBrowserHeaders({
+    accept: '*/*',
+    contentType: 'application/json',
+    referer: 'https://www.autotrader.co.uk/car-search?postcode=M1+7BL',
+    cookieHeader: 'bucket=desktop; __cf_bm=test',
+  });
+
+  assert.equal(headers.origin, 'https://www.autotrader.co.uk');
+  assert.equal(headers.referer, 'https://www.autotrader.co.uk/car-search?postcode=M1+7BL');
+  assert.equal(headers.cookie, 'bucket=desktop; __cf_bm=test');
+  assert.equal(headers['content-type'], 'application/json');
+});
+
+test('extractCookieHeader compacts response cookies for replay', () => {
+  const headers = {
+    getSetCookie() {
+      return [
+        'bucket=desktop; Domain=.autotrader.co.uk; path=/;',
+        '__cf_bm=abc123; HttpOnly; Secure; Path=/;',
+      ];
+    },
+  };
+
+  assert.equal(
+    extractCookieHeader(headers),
+    'bucket=desktop; __cf_bm=abc123',
+  );
 });
 
 test('normalizeLiveRecord keeps genuine listing fields and softens sold rows', () => {
