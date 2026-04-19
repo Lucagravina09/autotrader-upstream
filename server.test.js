@@ -3,11 +3,13 @@ const assert = require('node:assert/strict');
 
 const {
   buildAutotraderFilters,
+  buildAutotraderPayload,
   buildAutotraderSearchPageUrl,
   buildBrowserHeaders,
   extractCookieHeader,
   normalizeLiveRecord,
   parseSearchBrief,
+  shouldRetryWithCurl,
 } = require('./server');
 
 test('parseSearchBrief extracts make, model, and budget cleanly', () => {
@@ -69,6 +71,21 @@ test('buildBrowserHeaders keeps origin and cookie context for upstream fetches',
   assert.equal(headers.referer, 'https://www.autotrader.co.uk/car-search?postcode=M1+7BL');
   assert.equal(headers.cookie, 'bucket=desktop; __cf_bm=test');
   assert.equal(headers['content-type'], 'application/json');
+});
+
+test('buildAutotraderPayload preserves the GraphQL request contract', () => {
+  const payload = buildAutotraderPayload({
+    filters: [{ filter: 'postcode', selected: ['M1 7BL'] }],
+    page: 2,
+    searchId: 'curio-live-fiesta',
+  });
+
+  assert.equal(payload.operationName, 'SearchResultsListingsGridQuery');
+  assert.equal(payload.variables.page, 2);
+  assert.equal(payload.variables.searchId, 'curio-live-fiesta');
+  assert.deepEqual(payload.variables.filters, [
+    { filter: 'postcode', selected: ['M1 7BL'] },
+  ]);
 });
 
 test('extractCookieHeader compacts response cookies for replay', () => {
@@ -140,4 +157,23 @@ test('normalizeLiveRecord drops malformed or price-less rows', () => {
   );
 
   assert.equal(normalized, null);
+});
+
+test('shouldRetryWithCurl only retries on explicit gateway blocking', () => {
+  assert.equal(
+    shouldRetryWithCurl(new Error('AutoTrader gateway responded with 403')),
+    true,
+  );
+  assert.equal(
+    shouldRetryWithCurl(new Error('AutoTrader gateway timed out after 7000ms')),
+    true,
+  );
+  assert.equal(
+    shouldRetryWithCurl(new Error('fetch failed')),
+    true,
+  );
+  assert.equal(
+    shouldRetryWithCurl(new Error('AutoTrader gateway returned an error')),
+    false,
+  );
 });

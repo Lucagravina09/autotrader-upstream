@@ -1,5 +1,7 @@
 const express = require('express');
 const cors = require('cors');
+const { execFile } = require('node:child_process');
+const { promisify } = require('node:util');
 
 const AUTOTRADER_GRAPHQL_URL =
   process.env.AUTOTRADER_GRAPHQL_URL ||
@@ -15,6 +17,11 @@ const AUTOTRADER_PAGE_LIMIT = clamp(
   normalizePositiveInt(process.env.AUTOTRADER_PAGE_LIMIT, 20),
   1,
   50,
+);
+const AUTOTRADER_CURL_TIMEOUT_SECONDS = clamp(
+  normalizePositiveInt(process.env.AUTOTRADER_CURL_TIMEOUT_SECONDS, 10),
+  3,
+  20,
 );
 
 const AUTOTRADER_CHANNEL = 'cars';
@@ -211,6 +218,7 @@ app.use(cors());
 app.use(express.json());
 
 const PORT = process.env.PORT || 3000;
+const execFileAsync = promisify(execFile);
 
 app.get('/health', (_req, res) => {
   res.json({
@@ -295,14 +303,42 @@ app.get('/autotrader/search', async (req, res) => {
 });
 
 async function fetchAutotraderSearch({ filters, page, searchId }) {
+  const browserSession = await primeAutotraderSession({
+    filters,
+    signal: AbortSignal.timeout(AUTOTRADER_TIMEOUT_MS),
+  });
+
+  try {
+    return await fetchAutotraderSearchViaNode({
+      filters,
+      page,
+      searchId,
+      browserSession,
+    });
+  } catch (error) {
+    if (!shouldRetryWithCurl(error)) {
+      throw error;
+    }
+
+    return fetchAutotraderSearchViaCurl({
+      filters,
+      page,
+      searchId,
+      browserSession,
+    });
+  }
+}
+
+async function fetchAutotraderSearchViaNode({
+  filters,
+  page,
+  searchId,
+  browserSession,
+}) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), AUTOTRADER_TIMEOUT_MS);
 
   try {
-    const browserSession = await primeAutotraderSession({
-      filters,
-      signal: controller.signal,
-    });
     const response = await fetch(AUTOTRADER_GRAPHQL_URL, {
       method: 'POST',
       headers: buildBrowserHeaders({
@@ -351,6 +387,79 @@ async function fetchAutotraderSearch({ filters, page, searchId }) {
     throw error;
   } finally {
     clearTimeout(timeoutId);
+  }
+}
+
+async function fetchAutotraderSearchViaCurl({
+  filters,
+  page,
+  searchId,
+  browserSession,
+}) {
+  const payload = buildAutotraderPayload({
+    filters,
+    page,
+    searchId,
+  });
+  const args = [
+    '-sS',
+    '--compressed',
+    '--max-time',
+    String(AUTOTRADER_CURL_TIMEOUT_SECONDS),
+    AUTOTRADER_GRAPHQL_URL,
+    '-H',
+    `accept: */*`,
+    '-H',
+    `accept-language: en-GB,en;q=0.9`,
+    '-H',
+    `content-type: application/json`,
+    '-H',
+    `origin: ${AUTOTRADER_WEB_ORIGIN}`,
+    '-H',
+    `referer: ${browserSession.referer}`,
+    '-H',
+    `sec-ch-ua: "Google Chrome";v="135", "Not-A.Brand";v="8", "Chromium";v="135"`,
+    '-H',
+    'sec-ch-ua-mobile: ?0',
+    '-H',
+    'sec-ch-ua-platform: "macOS"',
+    '-H',
+    'sec-fetch-dest: empty',
+    '-H',
+    'sec-fetch-mode: cors',
+    '-H',
+    'sec-fetch-site: same-origin',
+    '-H',
+    `user-agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36`,
+  ];
+
+  if (browserSession.cookieHeader) {
+    args.push('-H', `cookie: ${browserSession.cookieHeader}`);
+  }
+
+  args.push('--data-raw', JSON.stringify(payload));
+
+  try {
+    const { stdout, stderr } = await execFileAsync('curl', args, {
+      maxBuffer: 1024 * 1024 * 2,
+    });
+    const jsonText = stdout.trim();
+
+    if (!jsonText) {
+      throw new Error(`AutoTrader curl returned an empty payload${stderr ? `: ${stderr.trim()}` : ''}`);
+    }
+
+    const parsed = JSON.parse(jsonText);
+
+    if (Array.isArray(parsed.errors) && parsed.errors.length > 0) {
+      const firstError = parsed.errors[0];
+      throw new Error(firstError.message || 'AutoTrader curl returned an error');
+    }
+
+    return parsed;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`AutoTrader curl fallback failed: ${message}`);
   }
 }
 
@@ -514,6 +623,22 @@ function buildAutotraderSearchPageUrl(filters) {
   }
 
   return `${AUTOTRADER_WEB_ORIGIN}/car-search?${params.toString()}`;
+}
+
+function buildAutotraderPayload({ filters, page, searchId }) {
+  return {
+    operationName: 'SearchResultsListingsGridQuery',
+    query: SEARCH_RESULTS_QUERY,
+    variables: {
+      filters,
+      channel: AUTOTRADER_CHANNEL,
+      page,
+      sortBy: DEFAULT_SORT,
+      listingType: DEFAULT_LISTING_TYPE,
+      searchId,
+      featureFlags: [],
+    },
+  };
 }
 
 function normalizeLiveRecords(rawListings, query) {
@@ -930,6 +1055,16 @@ function asRecord(value) {
   return value && typeof value === 'object' ? value : null;
 }
 
+function shouldRetryWithCurl(error) {
+  const message = error instanceof Error ? error.message : String(error);
+  return (
+    /\b403\b/.test(message) ||
+    /\bforbidden\b/i.test(message) ||
+    /\btimed out\b/i.test(message) ||
+    /\bfetch failed\b/i.test(message)
+  );
+}
+
 if (require.main === module) {
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`autotrader-upstream listening on ${PORT}`);
@@ -939,6 +1074,7 @@ if (require.main === module) {
 module.exports = {
   app,
   buildAutotraderFilters,
+  buildAutotraderPayload,
   buildAutotraderSearchPageUrl,
   buildBrowserHeaders,
   buildListingUrl,
@@ -952,4 +1088,5 @@ module.exports = {
   normalizeLiveRecords,
   parsePriceValue,
   parseSearchBrief,
+  shouldRetryWithCurl,
 };
