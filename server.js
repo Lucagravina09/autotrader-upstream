@@ -210,6 +210,7 @@ const SOLD_PATTERNS = [
 const app = express();
 app.use(cors());
 app.use(express.json());
+app.set('trust proxy', true);
 
 const PORT = process.env.PORT || 3000;
 
@@ -1060,10 +1061,35 @@ function asRecord(value) {
   return value && typeof value === 'object' ? value : null;
 }
 
-if (require.main === module) {
-  app.listen(PORT, '0.0.0.0', () => {
+function startServer() {
+  const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`autotrader-upstream listening on ${PORT}`);
   });
+
+  const shutdown = (signal) => {
+    console.log(`autotrader-upstream received ${signal}, shutting down`);
+    server.close((error) => {
+      if (error) {
+        console.error('autotrader-upstream shutdown failed', error);
+        process.exitCode = 1;
+      }
+      process.exit();
+    });
+
+    setTimeout(() => {
+      console.error('autotrader-upstream forced shutdown after timeout');
+      process.exit(1);
+    }, 15_000).unref();
+  };
+
+  process.once('SIGTERM', () => shutdown('SIGTERM'));
+  process.once('SIGINT', () => shutdown('SIGINT'));
+
+  return server;
+}
+
+if (require.main === module) {
+  startServer();
 }
 
 module.exports = {
@@ -1083,4 +1109,5 @@ module.exports = {
   normalizeLiveRecords,
   parsePriceValue,
   parseSearchBrief,
+  startServer,
 };

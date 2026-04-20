@@ -1,0 +1,22 @@
+[Unit]
+Description=Curio AutoTrader upstream backend
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=autotrader
+Group=autotrader
+WorkingDirectory=/srv/autotrader-upstream
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/autotrader-upstream.env
+ExecStart=/usr/bin/env node /srv/autotrader-upstream/server.js
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=20
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
