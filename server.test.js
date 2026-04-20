@@ -18,6 +18,8 @@ test('parseSearchBrief extracts make, model, and budget cleanly', () => {
   assert.equal(parsed.model, 'fiesta');
   assert.equal(parsed.maxPrice, 4000);
   assert.equal(parsed.keywords, '');
+  assert.deepEqual(parsed.transmissionHints, []);
+  assert.deepEqual(parsed.fuelHints, []);
 });
 
 test('parseSearchBrief removes soft filler words from broad car prompts', () => {
@@ -29,11 +31,20 @@ test('parseSearchBrief removes soft filler words from broad car prompts', () => 
   assert.equal(parsed.keywords, 'reliable');
 });
 
+test('parseSearchBrief keeps transmission and fuel hints available for filtering', () => {
+  const parsed = parseSearchBrief('first car ford fiesta manual petrol');
+
+  assert.deepEqual(parsed.transmissionHints, ['manual']);
+  assert.deepEqual(parsed.fuelHints, ['petrol']);
+});
+
 test('buildAutotraderFilters includes postcode and shaped search constraints', () => {
   const parsed = parseSearchBrief('sporty first car around 5k manual');
   const filters = buildAutotraderFilters({
     parsed,
     postcode: 'M1 7BL',
+    transmissionHints: parsed.transmissionHints,
+    fuelHints: parsed.fuelHints,
   });
 
   assert.deepEqual(filters, [
@@ -42,6 +53,7 @@ test('buildAutotraderFilters includes postcode and shaped search constraints', (
     { filter: 'min_price', selected: ['4000'] },
     { filter: 'max_price', selected: ['6000'] },
     { filter: 'keywords', selected: ['sporty'] },
+    { filter: 'transmission', selected: ['Manual'] },
   ]);
 });
 
@@ -143,6 +155,39 @@ test('normalizeLiveRecord keeps genuine listing fields and softens sold rows', (
   assert.equal(normalized.condition, 'Used');
   assert.equal(normalized.conditionText, 'USED');
   assert.equal(normalized.listingUrl, 'https://www.autotrader.co.uk/car-details/202604191234567');
+});
+
+test('normalizeLiveRecord carries applied filter hints into sparse live rows', () => {
+  const normalized = normalizeLiveRecord(
+    {
+      advertId: '202604201111111',
+      title: 'Ford Fiesta',
+      subTitle: '1.25 Zetec 3dr',
+      price: '£2,995',
+      sellerType: 'TRADE',
+      trackingContext: {
+        advertContext: {
+          make: 'Ford',
+          model: 'Fiesta',
+          year: '2013',
+          condition: 'used',
+        },
+        advertCardFeatures: {
+          condition: 'USED',
+        },
+      },
+    },
+    'fiesta',
+    {
+      transmissionHints: ['manual'],
+      fuelHints: ['petrol'],
+    },
+  );
+
+  assert.equal(normalized.transmission, 'Manual');
+  assert.equal(normalized.fuelType, 'Petrol');
+  assert.ok(normalized.tags.includes('manual'));
+  assert.ok(normalized.tags.includes('petrol'));
 });
 
 test('normalizeLiveRecord drops malformed or price-less rows', () => {

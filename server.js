@@ -206,6 +206,29 @@ const SOLD_PATTERNS = [
   /\breserved\b/i,
   /\bcoming soon\b/i,
 ];
+const TRANSMISSION_HINT_ALIASES = new Map([
+  ['manual', 'manual'],
+  ['automatic', 'automatic'],
+  ['auto', 'automatic'],
+]);
+const FUEL_HINT_ALIASES = new Map([
+  ['petrol', 'petrol'],
+  ['diesel', 'diesel'],
+  ['hybrid', 'hybrid'],
+  ['electric', 'electric'],
+  ['ev', 'electric'],
+  ['phev', 'hybrid'],
+  ['plug-in hybrid', 'hybrid'],
+]);
+const BODY_STYLE_HINT_ALIASES = new Map([
+  ['hatchback', 'hatchback'],
+  ['suv', 'suv'],
+  ['estate', 'estate'],
+  ['saloon', 'saloon'],
+  ['sedan', 'saloon'],
+  ['coupe', 'coupe'],
+  ['convertible', 'convertible'],
+]);
 
 const app = express();
 app.use(cors());
@@ -249,9 +272,24 @@ app.get('/autotrader/search', async (req, res) => {
     req.query.postcode || req.query.location || AUTOTRADER_DEFAULT_POSTCODE,
   );
   const parsed = parseSearchBrief(q);
+  const transmissionHints = mergeHintValues(
+    parsed.transmissionHints,
+    normalizeHintValues(req.query.transmission, TRANSMISSION_HINT_ALIASES),
+  );
+  const fuelHints = mergeHintValues(
+    parsed.fuelHints,
+    normalizeHintValues(req.query.fuel, FUEL_HINT_ALIASES),
+  );
+  const bodyStyleHints = mergeHintValues(
+    parsed.bodyStyleHints,
+    normalizeHintValues(req.query.bodyStyle, BODY_STYLE_HINT_ALIASES),
+  );
   const filters = buildAutotraderFilters({
     parsed,
     postcode,
+    transmissionHints,
+    fuelHints,
+    bodyStyleHints,
   });
   const startedAt = Date.now();
 
@@ -262,7 +300,11 @@ app.get('/autotrader/search', async (req, res) => {
       searchId: buildSearchId(q),
     });
     const rawListings = payload?.data?.searchResults?.listings;
-    const records = normalizeLiveRecords(rawListings, q).slice(
+    const records = normalizeLiveRecords(rawListings, q, {
+      transmissionHints,
+      fuelHints,
+      bodyStyleHints,
+    }).slice(
       0,
       AUTOTRADER_PAGE_LIMIT,
     );
@@ -544,10 +586,25 @@ function parseSearchBrief(query) {
     keywords: keywordWords.join(' ').trim(),
     maxPrice: maxPrice ?? aroundPrice?.max,
     minPrice: aroundPrice?.min ?? null,
+    transmissionHints: extractNormalizedHints(
+      compactQuery,
+      TRANSMISSION_HINT_ALIASES,
+    ),
+    fuelHints: extractNormalizedHints(compactQuery, FUEL_HINT_ALIASES),
+    bodyStyleHints: extractNormalizedHints(
+      compactQuery,
+      BODY_STYLE_HINT_ALIASES,
+    ),
   };
 }
 
-function buildAutotraderFilters({ parsed, postcode }) {
+function buildAutotraderFilters({
+  parsed,
+  postcode,
+  transmissionHints = [],
+  fuelHints = [],
+  bodyStyleHints = [],
+}) {
   const filters = [
     {
       filter: 'price_search_type',
@@ -594,6 +651,27 @@ function buildAutotraderFilters({ parsed, postcode }) {
     });
   }
 
+  if (transmissionHints.length > 0) {
+    filters.push({
+      filter: 'transmission',
+      selected: transmissionHints.map(toTitleCase),
+    });
+  }
+
+  if (fuelHints.length > 0) {
+    filters.push({
+      filter: 'fuel-type',
+      selected: fuelHints.map(toTitleCase),
+    });
+  }
+
+  if (bodyStyleHints.length > 0) {
+    filters.push({
+      filter: 'body-type',
+      selected: bodyStyleHints.map(toTitleCase),
+    });
+  }
+
   return filters;
 }
 
@@ -618,6 +696,15 @@ function buildAutotraderSearchPageUrl(filters) {
         break;
       case 'keywords':
         params.set('keywords', firstValue);
+        break;
+      case 'transmission':
+        params.set('transmission', firstValue);
+        break;
+      case 'fuel-type':
+        params.set('fuel-type', firstValue);
+        break;
+      case 'body-type':
+        params.set('body-type', firstValue);
         break;
       default:
         break;
@@ -647,7 +734,7 @@ function buildAutotraderPayload({ filters, page, searchId }) {
   };
 }
 
-function normalizeLiveRecords(rawListings, query) {
+function normalizeLiveRecords(rawListings, query, appliedHints = {}) {
   if (!Array.isArray(rawListings)) {
     return [];
   }
@@ -656,7 +743,7 @@ function normalizeLiveRecords(rawListings, query) {
   const records = [];
 
   for (const listing of rawListings) {
-    const normalized = normalizeLiveRecord(listing, query);
+    const normalized = normalizeLiveRecord(listing, query, appliedHints);
     if (!normalized) continue;
     if (seen.has(normalized.id)) continue;
     seen.add(normalized.id);
@@ -666,7 +753,7 @@ function normalizeLiveRecords(rawListings, query) {
   return records;
 }
 
-function normalizeLiveRecord(listing, query) {
+function normalizeLiveRecord(listing, query, appliedHints = {}) {
   if (!listing || typeof listing !== 'object') {
     return null;
   }
@@ -684,6 +771,9 @@ function normalizeLiveRecord(listing, query) {
   const distance = asRecord(trackingContext?.distance);
   const badges = normalizeBadges(listing.badges);
   const imageUrl = normalizeImageUrl(firstArrayValue(listing.images));
+  const requestedTransmission = firstHintValue(appliedHints.transmissionHints);
+  const requestedFuel = firstHintValue(appliedHints.fuelHints);
+  const requestedBodyStyle = firstHintValue(appliedHints.bodyStyleHints);
 
   if (!advertId || !title || numericPrice == null || numericPrice <= 0) {
     return null;
@@ -702,6 +792,25 @@ function normalizeLiveRecord(listing, query) {
     : sellerType === 'PRIVATE'
       ? 'private listing'
       : 'dealer listing';
+  const transmission =
+    toTitleCase(
+      cleanText(listing.transmission) ||
+        cleanText(features?.transmission) ||
+        cleanText(advertContext?.transmission),
+    ) || (requestedTransmission ? toTitleCase(requestedTransmission) : null);
+  const fuelType =
+    toTitleCase(
+      cleanText(listing.fuelType) ||
+        cleanText(listing.fuel) ||
+        cleanText(features?.fuelType) ||
+        cleanText(advertContext?.fuelType),
+    ) || (requestedFuel ? toTitleCase(requestedFuel) : null);
+  const bodyType =
+    toTitleCase(
+      cleanText(listing.bodyType) ||
+        cleanText(features?.bodyType) ||
+        cleanText(advertContext?.bodyType),
+    ) || (requestedBodyStyle ? toTitleCase(requestedBodyStyle) : null);
 
   return {
     id: advertId,
@@ -727,6 +836,9 @@ function normalizeLiveRecord(listing, query) {
     availabilityStatus: sold ? 'possibly-unavailable' : 'available',
     isAvailable: !sold,
     hasValidUrl: true,
+    transmission,
+    fuelType,
+    bodyType,
     make: cleanText(advertContext?.make) || extractFirstWord(title),
     model: cleanText(advertContext?.model) || subTitle || title,
     year: normalizePositiveInt(advertContext?.year, null),
@@ -735,7 +847,14 @@ function normalizeLiveRecord(listing, query) {
     numberOfImages: normalizePositiveInt(listing.numberOfImages, 0),
     rating: normalizeFloat(listing?.dealerReview?.overallReviewRating),
     reviewCount: 0,
-    tags: buildTags({ badges, subTitle, attentionGrabber }),
+    tags: buildTags({
+      badges,
+      subTitle,
+      attentionGrabber,
+      transmission,
+      fuelType,
+      bodyType,
+    }),
     dealerLink: dealerLink
       ? absolutizeAutoTraderPath(dealerLink)
       : null,
@@ -768,7 +887,14 @@ function normalizeBadges(badges) {
     .filter(Boolean);
 }
 
-function buildTags({ badges, subTitle, attentionGrabber }) {
+function buildTags({
+  badges,
+  subTitle,
+  attentionGrabber,
+  transmission,
+  fuelType,
+  bodyType,
+}) {
   const tagSet = new Set();
 
   for (const badge of badges) {
@@ -787,7 +913,51 @@ function buildTags({ badges, subTitle, attentionGrabber }) {
     if (/\belectric\b/i.test(text)) tagSet.add('electric');
   }
 
+  if (transmission) tagSet.add(transmission.toLowerCase());
+  if (fuelType) tagSet.add(fuelType.toLowerCase());
+  if (bodyType) tagSet.add(bodyType.toLowerCase());
+
   return Array.from(tagSet).slice(0, 8);
+}
+
+function normalizeHintValues(value, aliasMap) {
+  if (value == null) return [];
+  return mergeHintValues(
+    [],
+    String(value)
+      .split(/[,\n|/]+/g)
+      .map((token) => canonicalizeHint(token, aliasMap))
+      .filter(Boolean),
+  );
+}
+
+function mergeHintValues(primaryHints = [], secondaryHints = []) {
+  return Array.from(
+    new Set([
+      ...primaryHints.filter(Boolean).map((value) => value.toLowerCase()),
+      ...secondaryHints.filter(Boolean).map((value) => value.toLowerCase()),
+    ]),
+  );
+}
+
+function extractNormalizedHints(query, aliasMap) {
+  return Array.from(
+    new Set(
+      Array.from(aliasMap.entries())
+        .filter(([needle]) => query.includes(needle))
+        .map(([, canonical]) => canonical),
+    ),
+  );
+}
+
+function canonicalizeHint(value, aliasMap) {
+  const raw = cleanText(value).toLowerCase();
+  if (!raw) return null;
+  return aliasMap.get(raw) ?? raw;
+}
+
+function firstHintValue(values) {
+  return Array.isArray(values) && values.length > 0 ? values[0] : null;
 }
 
 function buildListingUrl(advertId) {
