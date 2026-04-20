@@ -34,6 +34,7 @@ test('parseSearchBrief removes soft filler words from broad car prompts', () => 
 test('parseSearchBrief keeps transmission and fuel hints available for filtering', () => {
   const parsed = parseSearchBrief('first car ford fiesta manual petrol');
 
+  assert.equal(parsed.keywords, 'manual petrol');
   assert.deepEqual(parsed.transmissionHints, ['manual']);
   assert.deepEqual(parsed.fuelHints, ['petrol']);
 });
@@ -52,8 +53,7 @@ test('buildAutotraderFilters includes postcode and shaped search constraints', (
     { filter: 'postcode', selected: ['M1 7BL'] },
     { filter: 'min_price', selected: ['4000'] },
     { filter: 'max_price', selected: ['6000'] },
-    { filter: 'keywords', selected: ['sporty'] },
-    { filter: 'transmission', selected: ['Manual'] },
+    { filter: 'keywords', selected: ['sporty manual'] },
   ]);
 });
 

@@ -560,14 +560,6 @@ function parseSearchBrief(query) {
     'approx',
     'approximately',
     'near',
-    'manual',
-    'automatic',
-    'auto',
-    'petrol',
-    'diesel',
-    'hybrid',
-    'electric',
-    'ev',
     'k',
     '£',
   ]);
@@ -598,13 +590,7 @@ function parseSearchBrief(query) {
   };
 }
 
-function buildAutotraderFilters({
-  parsed,
-  postcode,
-  transmissionHints = [],
-  fuelHints = [],
-  bodyStyleHints = [],
-}) {
+function buildAutotraderFilters({ parsed, postcode }) {
   const filters = [
     {
       filter: 'price_search_type',
@@ -651,27 +637,6 @@ function buildAutotraderFilters({
     });
   }
 
-  if (transmissionHints.length > 0) {
-    filters.push({
-      filter: 'transmission',
-      selected: transmissionHints.map(toTitleCase),
-    });
-  }
-
-  if (fuelHints.length > 0) {
-    filters.push({
-      filter: 'fuel-type',
-      selected: fuelHints.map(toTitleCase),
-    });
-  }
-
-  if (bodyStyleHints.length > 0) {
-    filters.push({
-      filter: 'body-type',
-      selected: bodyStyleHints.map(toTitleCase),
-    });
-  }
-
   return filters;
 }
 
@@ -696,15 +661,6 @@ function buildAutotraderSearchPageUrl(filters) {
         break;
       case 'keywords':
         params.set('keywords', firstValue);
-        break;
-      case 'transmission':
-        params.set('transmission', firstValue);
-        break;
-      case 'fuel-type':
-        params.set('fuel-type', firstValue);
-        break;
-      case 'body-type':
-        params.set('body-type', firstValue);
         break;
       default:
         break;
