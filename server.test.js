@@ -6,6 +6,7 @@ const {
   buildAutotraderPayload,
   buildAutotraderSearchPageUrl,
   buildBrowserHeaders,
+  buildSearchAttempts,
   extractCookieHeader,
   normalizeLiveRecord,
   parseSearchBrief,
@@ -54,6 +55,43 @@ test('buildAutotraderFilters includes postcode and shaped search constraints', (
     { filter: 'min_price', selected: ['4000'] },
     { filter: 'max_price', selected: ['6000'] },
     { filter: 'keywords', selected: ['sporty manual'] },
+  ]);
+});
+
+test('buildSearchAttempts broadens stacked car constraints without fake rows', () => {
+  const parsed = parseSearchBrief('Ford Fiesta manual petrol reliable car');
+  const attempts = buildSearchAttempts({
+    parsed,
+    postcode: 'M1 7BL',
+  });
+
+  assert.equal(attempts[0].label, 'exact live search');
+  assert.deepEqual(attempts[0].filters, [
+    { filter: 'price_search_type', selected: ['total'] },
+    { filter: 'postcode', selected: ['M1 7BL'] },
+    { filter: 'make', selected: ['Ford'] },
+    { filter: 'model', selected: ['Fiesta'] },
+    { filter: 'keywords', selected: ['manual petrol reliable'] },
+  ]);
+  assert.ok(attempts.some((attempt) => attempt.broadened));
+  assert.ok(
+    attempts.some((attempt) =>
+      attempt.filters.every((filter) => filter.filter !== 'keywords'),
+    ),
+  );
+});
+
+test('buildSearchAttempts keeps a useful broad term for vague sporty prompts', () => {
+  const parsed = parseSearchBrief('sporty first car low insurance');
+  const attempts = buildSearchAttempts({
+    parsed,
+    postcode: 'M1 7BL',
+  });
+
+  assert.deepEqual(attempts.at(-1).filters, [
+    { filter: 'price_search_type', selected: ['total'] },
+    { filter: 'postcode', selected: ['M1 7BL'] },
+    { filter: 'keywords', selected: ['sporty'] },
   ]);
 });
 
@@ -157,13 +195,15 @@ test('normalizeLiveRecord keeps genuine listing fields and softens sold rows', (
   assert.equal(normalized.listingUrl, 'https://www.autotrader.co.uk/car-details/202604191234567');
 });
 
-test('normalizeLiveRecord carries applied filter hints into sparse live rows', () => {
+test('normalizeLiveRecord carries actual vehicle detail fields into tags', () => {
   const normalized = normalizeLiveRecord(
     {
       advertId: '202604201111111',
       title: 'Ford Fiesta',
       subTitle: '1.25 Zetec 3dr',
       price: '£2,995',
+      transmission: 'Manual',
+      fuelType: 'Petrol',
       sellerType: 'TRADE',
       trackingContext: {
         advertContext: {
@@ -188,6 +228,36 @@ test('normalizeLiveRecord carries applied filter hints into sparse live rows', (
   assert.equal(normalized.fuelType, 'Petrol');
   assert.ok(normalized.tags.includes('manual'));
   assert.ok(normalized.tags.includes('petrol'));
+});
+
+test('normalizeLiveRecord does not invent missing transmission or fuel detail', () => {
+  const normalized = normalizeLiveRecord(
+    {
+      advertId: '202604201111112',
+      title: 'Ford Fiesta',
+      subTitle: '1.25 Zetec 3dr',
+      price: '£2,995',
+      sellerType: 'TRADE',
+      trackingContext: {
+        advertContext: {
+          make: 'Ford',
+          model: 'Fiesta',
+          year: '2013',
+          condition: 'used',
+        },
+      },
+    },
+    'fiesta manual petrol',
+    {
+      transmissionHints: ['manual'],
+      fuelHints: ['petrol'],
+    },
+  );
+
+  assert.equal(normalized.transmission, null);
+  assert.equal(normalized.fuelType, null);
+  assert.equal(normalized.tags.includes('manual'), false);
+  assert.equal(normalized.tags.includes('petrol'), false);
 });
 
 test('normalizeLiveRecord drops malformed or price-less rows', () => {

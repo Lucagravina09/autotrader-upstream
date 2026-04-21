@@ -229,6 +229,20 @@ const BODY_STYLE_HINT_ALIASES = new Map([
   ['coupe', 'coupe'],
   ['convertible', 'convertible'],
 ]);
+const BROADENING_KEYWORDS = new Set([
+  'automatic',
+  'auto',
+  'diesel',
+  'electric',
+  'economical',
+  'ev',
+  'hybrid',
+  'insurance',
+  'low',
+  'manual',
+  'petrol',
+  'reliable',
+]);
 
 const app = express();
 app.use(cors());
@@ -284,45 +298,39 @@ app.get('/autotrader/search', async (req, res) => {
     parsed.bodyStyleHints,
     normalizeHintValues(req.query.bodyStyle, BODY_STYLE_HINT_ALIASES),
   );
-  const filters = buildAutotraderFilters({
-    parsed,
-    postcode,
-    transmissionHints,
-    fuelHints,
-    bodyStyleHints,
-  });
+  const searchAttempts = buildSearchAttempts({ parsed, postcode });
   const startedAt = Date.now();
 
   try {
-    const payload = await fetchAutotraderSearch({
-      filters,
+    const searchResult = await runAutotraderSearchAttempts({
+      attempts: searchAttempts,
       page,
-      searchId: buildSearchId(q),
+      query: q,
+      appliedHints: {
+        transmissionHints,
+        fuelHints,
+        bodyStyleHints,
+      },
     });
-    const rawListings = payload?.data?.searchResults?.listings;
-    const records = normalizeLiveRecords(rawListings, q, {
-      transmissionHints,
-      fuelHints,
-      bodyStyleHints,
-    }).slice(
-      0,
-      AUTOTRADER_PAGE_LIMIT,
-    );
-    const totalResults = payload?.data?.searchResults?.page?.results?.count ?? 0;
 
     return res.json({
       ok: true,
       query: q,
       mode: 'live-graphql-search',
       requestDurationMs: Date.now() - startedAt,
-      totalResults,
+      totalResults: searchResult.totalResults,
       page,
-      filters,
-      note:
-        records.length > 0
-          ? `AutoTrader live search mapped ${records.length} records`
-          : `AutoTrader live search returned no records for "${q}"`,
-      records,
+      filters: searchResult.filters,
+      searchMode: searchResult.attempt.label,
+      broadened: searchResult.attempt.broadened,
+      searchAttempts: searchResult.searchAttempts,
+      note: buildLiveSearchNote({
+        query: q,
+        records: searchResult.records,
+        attempt: searchResult.attempt,
+        attempts: searchResult.searchAttempts,
+      }),
+      records: searchResult.records,
     });
   } catch (error) {
     return res.json({
@@ -332,7 +340,12 @@ app.get('/autotrader/search', async (req, res) => {
       requestDurationMs: Date.now() - startedAt,
       error: error instanceof Error ? error.message : String(error),
       note: 'AutoTrader live retrieval failed cleanly',
-      filters,
+      filters: searchAttempts[0]?.filters ?? [],
+      searchAttempts: searchAttempts.map((attempt) => ({
+        label: attempt.label,
+        broadened: attempt.broadened,
+        filters: attempt.filters,
+      })),
       records: [],
     });
   }
@@ -590,6 +603,157 @@ function parseSearchBrief(query) {
   };
 }
 
+async function runAutotraderSearchAttempts({
+  attempts,
+  page,
+  query,
+  appliedHints,
+}) {
+  const searchAttempts = [];
+  let lastEmptyResult = null;
+  let lastError = null;
+
+  for (const attempt of attempts) {
+    try {
+      const payload = await fetchAutotraderSearch({
+        filters: attempt.filters,
+        page,
+        searchId: buildSearchId(`${query}-${attempt.label}`),
+      });
+      const rawListings = payload?.data?.searchResults?.listings;
+      const records = normalizeLiveRecords(rawListings, query, {
+        ...appliedHints,
+        broadened: attempt.broadened,
+      }).slice(0, AUTOTRADER_PAGE_LIMIT);
+      const totalResults =
+        payload?.data?.searchResults?.page?.results?.count ?? 0;
+      const summary = {
+        label: attempt.label,
+        broadened: attempt.broadened,
+        filters: attempt.filters,
+        totalResults,
+        recordCount: records.length,
+      };
+      searchAttempts.push(summary);
+
+      const result = {
+        attempt,
+        filters: attempt.filters,
+        records,
+        totalResults,
+        searchAttempts,
+      };
+
+      if (records.length > 0) {
+        return result;
+      }
+
+      lastEmptyResult = result;
+    } catch (error) {
+      lastError = error;
+      searchAttempts.push({
+        label: attempt.label,
+        broadened: attempt.broadened,
+        filters: attempt.filters,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  if (lastEmptyResult) {
+    return {
+      ...lastEmptyResult,
+      searchAttempts,
+    };
+  }
+
+  throw lastError ?? new Error('AutoTrader live search had no valid attempts');
+}
+
+function buildLiveSearchNote({ query, records, attempt, attempts }) {
+  if (records.length > 0) {
+    if (attempt.broadened) {
+      return `AutoTrader broadened the live search after the exact pass returned no rows and mapped ${records.length} records`;
+    }
+    return `AutoTrader live search mapped ${records.length} records`;
+  }
+
+  if (attempts.length > 1) {
+    return `AutoTrader live search returned no records for "${query}" after ${attempts.length} retrieval passes`;
+  }
+
+  return `AutoTrader live search returned no records for "${query}"`;
+}
+
+function buildSearchAttempts({ parsed, postcode }) {
+  const attempts = [];
+  const seen = new Set();
+
+  const addAttempt = (label, attemptParsed, broadened = false) => {
+    if (isOverBroadAttempt(attemptParsed)) return;
+    const filters = buildAutotraderFilters({
+      parsed: attemptParsed,
+      postcode,
+    });
+    const key = JSON.stringify(filters);
+    if (seen.has(key)) return;
+    seen.add(key);
+    attempts.push({
+      label,
+      broadened,
+      parsed: attemptParsed,
+      filters,
+    });
+  };
+
+  addAttempt('exact live search', parsed);
+
+  const relaxedKeywords = relaxSearchKeywords(parsed.keywords);
+  if (relaxedKeywords !== parsed.keywords) {
+    addAttempt(
+      'relaxed constraint search',
+      { ...parsed, keywords: relaxedKeywords },
+      true,
+    );
+  }
+
+  if (parsed.keywords) {
+    addAttempt('core vehicle search', { ...parsed, keywords: '' }, true);
+  }
+
+  return attempts.length > 0
+    ? attempts
+    : [
+        {
+          label: 'exact live search',
+          broadened: false,
+          parsed,
+          filters: buildAutotraderFilters({ parsed, postcode }),
+        },
+      ];
+}
+
+function isOverBroadAttempt(parsed) {
+  return (
+    !parsed.make &&
+    !parsed.model &&
+    !parsed.keywords &&
+    parsed.minPrice == null &&
+    parsed.maxPrice == null
+  );
+}
+
+function relaxSearchKeywords(keywords) {
+  const words = String(keywords || '')
+    .split(/\s+/g)
+    .map((word) => word.trim().toLowerCase())
+    .filter(Boolean);
+  if (words.length === 0) return '';
+
+  const relaxed = words.filter((word) => !BROADENING_KEYWORDS.has(word));
+  return relaxed.join(' ').trim();
+}
+
 function buildAutotraderFilters({ parsed, postcode }) {
   const filters = [
     {
@@ -727,10 +891,6 @@ function normalizeLiveRecord(listing, query, appliedHints = {}) {
   const distance = asRecord(trackingContext?.distance);
   const badges = normalizeBadges(listing.badges);
   const imageUrl = normalizeImageUrl(firstArrayValue(listing.images));
-  const requestedTransmission = firstHintValue(appliedHints.transmissionHints);
-  const requestedFuel = firstHintValue(appliedHints.fuelHints);
-  const requestedBodyStyle = firstHintValue(appliedHints.bodyStyleHints);
-
   if (!advertId || !title || numericPrice == null || numericPrice <= 0) {
     return null;
   }
@@ -753,20 +913,20 @@ function normalizeLiveRecord(listing, query, appliedHints = {}) {
       cleanText(listing.transmission) ||
         cleanText(features?.transmission) ||
         cleanText(advertContext?.transmission),
-    ) || (requestedTransmission ? toTitleCase(requestedTransmission) : null);
+    ) || null;
   const fuelType =
     toTitleCase(
       cleanText(listing.fuelType) ||
         cleanText(listing.fuel) ||
         cleanText(features?.fuelType) ||
         cleanText(advertContext?.fuelType),
-    ) || (requestedFuel ? toTitleCase(requestedFuel) : null);
+    ) || null;
   const bodyType =
     toTitleCase(
       cleanText(listing.bodyType) ||
         cleanText(features?.bodyType) ||
         cleanText(advertContext?.bodyType),
-    ) || (requestedBodyStyle ? toTitleCase(requestedBodyStyle) : null);
+    ) || null;
 
   return {
     id: advertId,
@@ -1225,6 +1385,7 @@ module.exports = {
   buildAutotraderSearchPageUrl,
   buildBrowserHeaders,
   buildListingUrl,
+  buildSearchAttempts,
   buildSearchId,
   deriveSellerName,
   extractCookieHeader,
